@@ -55,7 +55,7 @@ func banner() {
 |  |  |-   -|__   |__   |
 |_____|__|__|_____|_____|
                          
-	4.0 - @KathanP19 (modded)
+	4.1 - @KathanP19 (modded)
 	`)
 }
 
