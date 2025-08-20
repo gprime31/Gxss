@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -19,14 +18,15 @@ import (
 )
 
 var (
-	concurrency int
-	verbose     bool
-	outputFile  string
-	payload     string
-	useragent   string
-	proxy       string
-	requestData string
-	method      string
+	concurrency   int
+	verbose       bool
+	outputFile    string
+	payload       string
+	useragent     string
+	proxy         string
+	requestData   string
+	method        string
+	appendPayload bool
 )
 
 type customh []string
@@ -62,6 +62,7 @@ func main() {
 	flag.StringVar(&proxy, "x", "", "Proxy URL. Example: http://127.0.0.1:8080")
 	flag.StringVar(&useragent, "u", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/86.0.4240.111 Safari/537.36", "Set Custom User agent. Default is Mozilla")
 	flag.Var(&custhead, "h", "Set Custom Header.")
+	flag.BoolVar(&appendPayload, "a", false, "Append payload to the parameter value instead of replacing")
 
 	flag.Parse()
 
@@ -73,11 +74,9 @@ func main() {
 
 		if outputFile != "" {
 			emptyFile, err := os.Create(outputFile)
-			if err != nil {
-				log.Fatal(err)
+			if err == nil {
+				emptyFile.Close()
 			}
-			log.Println("Created " + outputFile)
-			emptyFile.Close()
 
 			var wg sync.WaitGroup
 			for i := 0; i < concurrency; i++ {
@@ -116,7 +115,6 @@ func testref(payload string, verbose bool, outputFile string, requestData string
 		link := scanner.Text()
 		checkreflection(link)
 	}
-
 }
 
 func checkreflection(link string) {
@@ -124,11 +122,12 @@ func checkreflection(link string) {
 	u, err := url.Parse(decoded)
 	if err != nil {
 		decoded := url.QueryEscape(link)
-		v, err := url.Parse(decoded)
-		if err != nil {
-			fmt.Printf("Error is %s\n", err.Error())
+		v, err2 := url.Parse(decoded)
+		if err2 == nil {
+			u = v
+		} else {
+			return
 		}
-		u = v
 	}
 
 	if verbose {
@@ -136,23 +135,29 @@ func checkreflection(link string) {
 	}
 	q, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
-		fmt.Printf("Error is %s\n", err.Error())
+		return
 	}
 
 	if requestData != "" {
 		method = "POST"
 		q, err = url.ParseQuery(requestData)
+		if err != nil {
+			return
+		}
 	} else {
 		method = "GET"
 	}
 
-	if err != nil {
-		fmt.Println(err)
-	}
-
 	for key, value := range q {
 		var tm string = value[0]
-		q.Set(key, payload)
+
+		// NEW: append or replace payload depending on -a
+		if appendPayload {
+			q.Set(key, tm+payload)
+		} else {
+			q.Set(key, payload)
+		}
+
 		if method == "GET" {
 			u.RawQuery = q.Encode()
 		}
@@ -173,29 +178,25 @@ func checkreflection(link string) {
 			}
 			if outputFile != "" {
 				f, err := os.OpenFile(outputFile, os.O_APPEND|os.O_WRONLY, 0644)
-				if err != nil {
-					log.Println(err)
+				if err == nil {
+					_, _ = f.WriteString(u.String() + "\n")
+					f.Close()
 				}
-				if _, err := f.WriteString(u.String() + "\n"); err != nil {
-					log.Fatal(err)
-				}
-				f.Close()
 			}
 		}
-		q.Set(key, tm)
+		q.Set(key, tm) // restore original
 	}
 }
 
-//removed gorequest for more granular access to setting headers.
+// removed gorequest for more granular access to setting headers.
 
 func requestfunc(u string, requestData string, method string) (resp *http.Response, body string, errs []error) {
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
 	if proxy != "" {
 		proxyUrl, err := url.Parse(proxy)
-		http.DefaultTransport = &http.Transport{Proxy: http.ProxyURL(proxyUrl)}
-		if err != nil {
-			fmt.Println(err)
+		if err == nil {
+			http.DefaultTransport = &http.Transport{Proxy: http.ProxyURL(proxyUrl)}
 		}
 	}
 
@@ -204,36 +205,39 @@ func requestfunc(u string, requestData string, method string) (resp *http.Respon
 	}
 
 	req, err := http.NewRequest(method, u, bytes.NewBufferString(requestData))
-	req.Header.Add("User-Agent", useragent)
-
 	if err != nil {
-		fmt.Println(err)
+		return nil, "", nil
 	}
+	req.Header.Add("User-Agent", useragent)
 
 	if method == "POST" {
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	}
-	//splitting headers and values by using : as separator
+	// splitting headers and values by using : as separator
 	for _, v := range custhead {
 		s := strings.SplitN(v, ":", 2)
-		req.Header.Add(s[0], s[1])
+		if len(s) == 2 {
+			req.Header.Add(s[0], s[1])
+		}
 	}
 
-	//Converting request dump to string for verbose mode
-	requestDump, err := httputil.DumpRequest(req, true)
-	if err != nil {
-		fmt.Println(err)
-	}
+	// Converting request dump to string for verbose mode
 	if verbose {
-		fmt.Println(string(requestDump))
+		requestDump, err := httputil.DumpRequest(req, true)
+		if err == nil {
+			fmt.Println(string(requestDump))
+		}
 	}
+
 	resp, err = client.Do(req)
 	if err != nil {
-		return
+		return nil, "", nil
 	}
+	defer resp.Body.Close()
+
 	bodyBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatal(err)
+		return resp, "", nil
 	}
 	bodyString := string(bodyBytes)
 	return resp, bodyString, errs
